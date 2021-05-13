@@ -188,7 +188,7 @@ def msrpc(target, creds):
 def execute(cmd, target, creds):
 	ip, port = target
 	username, password, domain = creds
-	print(ip, username, password, domain, port)
+	#print(ip, username, password, domain, port)
 	dce = msrpc((ip, port), (username, password, domain))
 	execute = Execute()
 	execute["cmd"] = cmd + "\x00"
@@ -197,8 +197,10 @@ def execute(cmd, target, creds):
 
 is_stop = False
 def proxy(target_from, target_to, creds):
+	ip_from, port_from = target_from
+	ip_to, port_to = target_to
 	username, password, domain = creds
-	print(target_from, target_to ,username, password, domain)
+	#print(target_from, target_to ,username, password, domain)
 
 	def incoming(c, sock):
 		global is_stop
@@ -213,20 +215,20 @@ def proxy(target_from, target_to, creds):
 				print("incoming closed")
 				is_stop = True
 				break
-			print("<-" + str(data) + "[" + str(len(data)) + "]")
+#			print("<-" + str(data) + "[" + str(len(data)) + "]")
 			c.send(data)
 			#print("incoming")
 
 	def outcoming(c, sock):
 		global is_stop
-		dce = msrpc((target_from, 445), (username, password, domain))
+		dce = msrpc((ip_from, port_from), (username, password, domain))
 		while True:
 			data = c.recv(1024)
 			if not data or is_stop:
 				print("outcoming closed")
 				is_stop = True
 				break
-			print("->" + str(data) + "[" + str(len(data)) + "]")
+#			print("->" + str(data) + "[" + str(len(data)) + "]")
 			send = Send()
 			send["socket"] = sock
 			send["data"] = data + b"\x00"
@@ -245,12 +247,12 @@ def proxy(target_from, target_to, creds):
 		while True:
 			c,info = s.accept()
 			if fork() == 0:
-				dce = msrpc((target_from, 445), (username, password, domain))
+				dce = msrpc((ip_from, port_from), (username, password, domain))
 				connect = Connect()
-				connect["ip"] = target_to + "\x00"
-				connect["port"] = 445
+				connect["ip"] = ip_to + "\x00"
+				connect["port"] = port_to
 				res = dce.request(connect, checkError=False)
-				res.dump()
+				#res.dump()
 				if res["socket"]:
 					is_stop = False
 					incoming_thr = Thread(target=incoming, args=(c,res["socket"]))
@@ -265,10 +267,10 @@ def proxy(target_from, target_to, creds):
 					disconnect = Disconnect()
 					disconnect["socket"] = res["socket"]
 					res = dce.request(disconnect)
-					res.dump()
+					#res.dump()
 					exit()
 			else:
-				print(f"[*] proxying {info[0]}:{info[1]}")
+				print(f"[*] proxying {info[0]}:{info[1]} -> {local_port}")
 	return local_port
 
 def check_pipe(target, creds):
@@ -295,11 +297,17 @@ if __name__ == '__main__':
 	domain = '.'
 	ip = target
 	port = 445
+	proxy_chains = []
 	while True:
 		line = input(f"{target}/> ")
 		if line.startswith("shell "):
 			_,new_target = line.split(" ")
-			port = proxy(target, new_target, (username, password, domain))
+			if not proxy_chains:
+				port = proxy((ip, 445), (new_target, 445), (username, password, domain))
+			else:
+				port = proxy(("127.0.0.1", proxy_chains[-1]), (new_target, 445), (username, password, domain))
+			proxy_chains.append(port)
+			print(str(proxy_chains))
 			target = new_target
 			ip = "127.0.0.1"
 		elif line in ('exit', 'quit', 'q'):
