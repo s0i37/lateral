@@ -1,0 +1,38 @@
+[
+	uuid(00001111-2222-3333-4444-555566667777),
+	version(1.0),
+]
+interface lateral
+{
+	typedef [context_handle] void * CONTEXT_HANDLE;
+	int _connect(
+		[in] handle_t hBinding,
+		[in, string] char *ip,
+		[in] short port
+	);
+
+	int _disconnect(
+		[in] handle_t hBinding,
+		[in] int socket
+	);
+
+	int _send(
+		[in] handle_t hBinding,
+		[in] int socket,
+		[in, string] char *buf,
+		[in] int len
+	);
+
+	int _recv(
+		[in] handle_t hBinding,
+		[in] int socket,
+		[in] int len,
+		[out, size_is(len)] byte *buf
+	);
+
+	int _execute(
+	    [in] handle_t hBinding,
+		[in, string] char *cmd,
+		[out, string] char **out
+	);
+}
