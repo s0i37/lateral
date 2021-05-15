@@ -350,5 +350,5 @@ if __name__ == '__main__':
 		else:
 			cmd = line
 			if not check_pipe((chain.target_ip, chain.target_port), (username, password, domain)):
-				install_service((chains.target_ip, chain.target_port), (username, password, domain))
+				install_service((chain.target_ip, chain.target_port), (username, password, domain))
 			print( execute(cmd, (chain.target_ip, chain.target_port), (username, password, domain)) )
