@@ -174,8 +174,8 @@ int _recv(handle_t hBinding, int socket, int len, char *buf)
 
     FD_ZERO(&conn);
     FD_SET(socket, &conn);
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 500;
     if(select(0, &conn, 0, 0, &timeout) > 0)
         recv_bytes = recv((SOCKET)socket, buf, len, 0);
     return recv_bytes;
