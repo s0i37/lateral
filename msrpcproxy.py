@@ -20,6 +20,45 @@ from time import sleep
 import threading
 import argparse
 
+__all__ = ["msrpc"]
+
+class Target:
+	def __init__(self, host, user, passwd, domain=".", nthash="", port=445):
+		self.target = host
+		self.ip = host
+		self.target_ip = host
+		self.port = port
+		self.target_port = port
+		self.creds = user, passwd, domain
+		self.next = []
+		self.prev = None
+		self.connections = {}
+	def new(self, host, port):
+		self.next.append( Target(host, self.creds[0], self.creds[0], self.creds[0], port) )
+		self.next[-1].prev = self
+		self.next[-1].ip = "127.0.0.1"
+		self.next[-1].target_ip = "127.0.0.1"
+		return self.next[-1]
+
+class msrpc:
+	def __init__(self, host, user, passwd, domain=".", nthash="", port=445):
+		self.target = Target(host, user, passwd, domain, nthash, port)
+		if not check_pipe(self.target):
+			install_service(self.target)
+		self.target.dce_session = {
+			"main": {"dce": msrpc_connect(self.target), "mutex": threading.Lock()},
+			"incoming": {"dce": msrpc_connect(self.target), "mutex": threading.Lock(), "sockets": {}},
+			"outcoming": {"dce": msrpc_connect(self.target), "mutex": threading.Lock()},
+		}
+	def __call__(self, cmd):
+		return execute(cmd, self.target)
+	def msrpc(self, host, user, passwd, domain=".", nthash="", port=445):
+		port = proxy(self.target, Target(host, user, passwd, domain, nthash, port))
+		self.target.new(host, port)
+		target = msrpc("127.0.0.1", user, passwd, domain, nthash, port)
+		target.target.target = host
+		return target
+
 
 def copy(target, source_path, target_path, share="c$", lmhash="", nthash=""):
 	username, password, domain = target.creds
@@ -171,7 +210,7 @@ class ExecuteResponse(NDRCALL):
         ('data',LPSTR),
     )
 
-def msrpc(target):
+def msrpc_connect(target):
 	username, password, domain = target.creds
 	MSRPC_UUID_lateral  = uuidtup_to_bin(('00001111-2222-3333-4444-555566667777','1.0'))
 
@@ -191,7 +230,7 @@ def msrpc(target):
 		return False
 
 def execute(cmd, target):
-	dce = msrpc(target)
+	dce = msrpc_connect(target)
 	execute = Execute()
 	execute["cmd"] = cmd + "\x00"
 	res = dce.request(execute)
@@ -328,28 +367,6 @@ def proxy(chain, target):
 	local_port = s.getsockname()[1]
 	return local_port
 
-def test_tcp(chain, target):
-	global dce_sessions
-	ip_from, port_from = target_from
-	ip_to, port_to = target_to
-
-	dce = dce_sessions[ip_from]["main"]["dce"]
-	connect = Connect()
-	connect["ip"] = ip_to + "\x00"
-	connect["port"] = port_to
-	dce_sessions[ip_from]["main"]["mutex"].acquire()
-	res = dce.request(connect, checkError=False)
-	dce_sessions[ip_from]["main"]["mutex"].release()
-	if res["socket"]:
-		disconnect = Disconnect()
-		disconnect["socket"] = res["socket"]
-		dce_sessions[ip_from]["main"]["mutex"].acquire()
-		res = dce.request(disconnect)
-		dce_sessions[ip_from]["main"]["mutex"].release()
-		return True
-	else:
-		return False
-
 def socks(port):
 	global chain
 	s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -411,9 +428,9 @@ class Chain:
 			if not check_pipe(target=self):
 				install_service(target=self)
 		self.dce_session = {
-			"main": {"dce": msrpc(self), "mutex": threading.Lock()},
-			"incoming": {"dce": msrpc(self), "mutex": threading.Lock(), "sockets": {}},
-			"outcoming": {"dce": msrpc(self), "mutex": threading.Lock()},
+			"main": {"dce": msrpc_connect(self), "mutex": threading.Lock()},
+			"incoming": {"dce": msrpc_connect(self), "mutex": threading.Lock(), "sockets": {}},
+			"outcoming": {"dce": msrpc_connect(self), "mutex": threading.Lock()},
 		}
 		for flow in ["main", "incoming", "outcoming"]:
 			if not self.dce_session[flow]["dce"]:
@@ -468,11 +485,6 @@ def cmd_loop(line):
 			chain = chain.prev
 			if chain:
 				chain.next.pop()
-	elif line.startswith("test "):
-		if chain:
-			target = parse_target(line.strip().split(" ")[1:])
-			if test_tcp(chain, target):
-				print("ok")
 	elif line in ("show", "bt", "stack"):
 		chain_walk(chain_get_root(chain))
 	elif line in ("back",):
