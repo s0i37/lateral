@@ -156,11 +156,13 @@ int _send(handle_t hBinding, int socket, byte *buf, int len)
     return sent_bytes;
 }
 
-int _recv(handle_t hBinding, int socket, int len, char *buf)
+int _recv(handle_t hBinding, int sockets_count, int *sockets, int len, int *socket, char *buf)
 {
     int recv_bytes = -1;
     fd_set conn;
     struct timeval timeout;
+    unsigned int i;
+    unsigned int maxfd = 0;
     //char *x = malloc(len);
     //memset(x, 0, len);
     //*buf = x;
@@ -168,16 +170,32 @@ int _recv(handle_t hBinding, int socket, int len, char *buf)
 
     FILE *f;
     f = fopen("c:\\_recv","w");
-    fprintf(f, "%d %d\n", socket, len);
+    fprintf(f, "%d %d\n", sockets_count, len);
     fflush(f);
     fclose(f);
 
+    *socket = 0;
     FD_ZERO(&conn);
-    FD_SET(socket, &conn);
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 500;
-    if(select(0, &conn, 0, 0, &timeout) > 0)
-        recv_bytes = recv((SOCKET)socket, buf, len, 0);
+    for(i = 0; i < sockets_count; i++)
+    {
+        FD_SET(sockets[i], &conn);
+        if(sockets[i] > maxfd)
+            maxfd = sockets[i];
+    }
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+    if(select(maxfd+1, &conn, 0, 0, &timeout) > 0)
+    {
+        for(i = 0; i < sockets_count; i++)
+        {
+            if(FD_ISSET(sockets[i], &conn))
+            {
+                recv_bytes = recv((SOCKET)sockets[i], buf, len, 0);
+                *socket = sockets[i];
+                break;
+            }
+        }
+    }
     return recv_bytes;
 }
 
