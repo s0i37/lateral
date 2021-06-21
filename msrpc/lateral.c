@@ -209,6 +209,7 @@ int _execute(handle_t hBinding, char *cmd , char **out)
     HANDLE r, w;
     SECURITY_ATTRIBUTES attr;
     int bytes_read = 0;
+    char exec[512] = "c:\\windows\\system32\\cmd.exe /C ";
 
     FILE *f;
     f = fopen("c:\\_execute","w");
@@ -227,7 +228,8 @@ int _execute(handle_t hBinding, char *cmd , char **out)
     sui.cb = sizeof(sui);
     sui.dwFlags = (STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW);
     sui.hStdOutput = sui.hStdError = w;
-    CreateProcess(0, cmd, 0, 0, 1, 0, 0, 0, &sui, &pi);
+    strcat(exec, cmd);
+    CreateProcess(0, exec, 0, 0, 1, 0, 0, 0, &sui, &pi);
     WaitForSingleObject(pi.hProcess, INFINITE);
     memset(x, '\x00', buf_size);
     ReadFile(r, x, buf_size, &bytes_read, 0);
