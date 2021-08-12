@@ -81,9 +81,6 @@ VOID ExecuteServiceCode()
     while (1)
     {
         WaitForSingleObject(stopEvent, INFINITE);
-        FILE *f;
-        f = fopen("c:\\_exit","w");
-        fclose(f);
         UpdateServiceStatus(SERVICE_STOPPED);
         return;
     }
@@ -106,12 +103,6 @@ int _connect(handle_t hBinding, char *ip, short port)
     struct sockaddr_in sock_addr;
     //int on;
     SOCKET c;
-    
-    FILE *f;
-    f = fopen("c:\\_connect","w");
-    fprintf(f, "%s:%d\n", ip, port);
-    fflush(f);
-    fclose(f);
 
     if( WSAStartup( MAKEWORD(2, 2), &wsa_data ) )
         return 0;
@@ -132,11 +123,6 @@ int _connect(handle_t hBinding, char *ip, short port)
 
 int _disconnect(handle_t hBinding, int socket)
 {
-    FILE *f;
-    f = fopen("c:\\_disconnect","w");
-    fprintf(f, "%d\n", socket);
-    fclose(f);
-
     closesocket((SOCKET)socket);
     //WSACleanup();
     return 0;
@@ -146,12 +132,6 @@ int _send(handle_t hBinding, int socket, byte *buf, int len)
 {
     int sent_bytes;
     
-    FILE *f;
-    f = fopen("c:\\_send","w");
-    fprintf(f, "%d %s %d\n", socket, buf, len);
-    fflush(f);
-    fclose(f);
-
     sent_bytes = send((SOCKET)socket, buf, len, 0);
     return sent_bytes;
 }
@@ -167,12 +147,6 @@ int _recv(handle_t hBinding, int sockets_count, int *sockets, int len, int *sock
     //memset(x, 0, len);
     //*buf = x;
     //buf = x;
-
-    FILE *f;
-    f = fopen("c:\\_recv","w");
-    fprintf(f, "%d %d\n", sockets_count, len);
-    fflush(f);
-    fclose(f);
 
     *socket = 0;
     FD_ZERO(&conn);
@@ -211,12 +185,6 @@ int _execute(handle_t hBinding, char *cmd , char **out)
     int bytes_read = 0;
     char exec[512] = "c:\\windows\\system32\\cmd.exe /C ";
 
-    FILE *f;
-    f = fopen("c:\\_execute","w");
-    fprintf(f, "%s\n", cmd);
-    fflush(f);
-    fclose(f);
-    
     memset(&attr, 0, sizeof(SECURITY_ATTRIBUTES));
     attr.nLength = sizeof(SECURITY_ATTRIBUTES);
     attr.bInheritHandle = 1;

