@@ -34,6 +34,12 @@ And now lateral movement can be fully automated.
 
 ![python-api2](https://user-images.githubusercontent.com/22872513/128856366-95919d1b-6f36-435c-a0a0-e86af86d6d21.png)
 
+## Problems
+
+* Overheads. Each new chain brings a 5-fold increase in traffic because of RPC transport.
+* At the moment there are some problems with WindowsXP (can be fixed)
+* `MSRPCProxy` cannot be run through `proxychains`. Because under the hood, it uses localhost connections. You should use transparent proxying in this case (`redsocks`)
+
 ## Legal
 
 GPL.
