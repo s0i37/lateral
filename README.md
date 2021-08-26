@@ -39,6 +39,7 @@ And now lateral movement can be fully automated.
 * Overheads. Each new chain brings a 5-fold increase in traffic because of RPC transport.
 * At the moment there are some problems with WindowsXP (can be fixed)
 * `MSRPCProxy` cannot be run through `proxychains`. Because under the hood, it uses localhost connections. You should use transparent proxying in this case (`redsocks`)
+* With chains greater than 1, dangling sessions may appear on distant nodes (you can check this `net stop server`). This is due to problems with the blocking calls of the RPC. If there are a lot of hanging sessions (about 20), the RPC may stop working completely and you will lose all remote control (you will need to restart the `server` service manualy). This problem has not been resolved yet, therefore it is recommended to periodically remove the proxy service (`msrpcproxy.py "clear -user admin -pass 123 10.0.0.64`)
 
 ## Legal
 
